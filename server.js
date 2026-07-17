@@ -1,9 +1,11 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import mysql from 'mysql2/promise';
+import nodemailer from 'nodemailer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +20,48 @@ app.use(express.json());
 const DATA_DIR = path.join(__dirname, 'data');
 const LINKS_FILE = path.join(DATA_DIR, 'db_links.json');
 const LOGS_FILE = path.join(DATA_DIR, 'ping_logs.json');
+
+// State tracking for status transitions (to avoid email spamming)
+const lastKnownStatuses = new Map();
+
+// Send email notification helper
+async function sendEmailNotification(subject, text) {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, NOTIFICATION_EMAILS } = process.env;
+
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS || !NOTIFICATION_EMAILS) {
+    console.warn('[Email Alert] SMTP environment variables are not fully configured. Skipping email notification.');
+    return;
+  }
+
+  const recipients = NOTIFICATION_EMAILS.split(',').map(e => e.trim()).filter(Boolean);
+  if (recipients.length === 0) {
+    console.warn('[Email Alert] No valid recipient emails found in NOTIFICATION_EMAILS. Skipping email notification.');
+    return;
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: parseInt(SMTP_PORT || '587'),
+      secure: parseInt(SMTP_PORT || '587') === 465, // true for 465, false for other ports
+      auth: {
+        user: SMTP_USER,
+        pass: SMTP_PASS
+      }
+    });
+
+    const info = await transporter.sendMail({
+      from: `"DB-Pulse Monitor" <${SMTP_USER}>`,
+      to: recipients.join(', '),
+      subject,
+      text
+    });
+
+    console.log(`[Email Alert] Notification email sent successfully to: ${recipients.join(', ')}. Message ID: ${info.messageId}`);
+  } catch (error) {
+    console.error('[Email Alert] Failed to send email alert:', error.message);
+  }
+}
 
 // Ensure data directory and files exist
 if (!fs.existsSync(DATA_DIR)) {
@@ -183,6 +227,7 @@ async function pingDatabase(link) {
   let status = 'ONLINE';
   let latency = 0;
   let message = 'Connection active';
+  let dbError = '';
 
   try {
     const config = parseConnectionString(link.connectionString);
@@ -193,6 +238,7 @@ async function pingDatabase(link) {
     latency = Date.now() - start;
     status = 'OFFLINE';
     message = error.message;
+    dbError = error.message; // Capture original connection error
     console.warn(`[Ping Failed] Database "${link.name}" is offline:`, message);
 
     // If Aiven auto-recovery is enabled, attempt to power it on!
@@ -241,6 +287,38 @@ async function pingDatabase(link) {
     logs[link.id] = logs[link.id].slice(0, 100);
   }
   writeJSON(LOGS_FILE, logs);
+
+  // Handle status transition email alerts
+  const lastStatus = lastKnownStatuses.get(link.id);
+  if (lastStatus !== undefined && lastStatus !== status) {
+    // Transition 1: ONLINE -> OFFLINE or RECOVERING
+    if (lastStatus === 'ONLINE' && (status === 'OFFLINE' || status === 'RECOVERING')) {
+      const subject = `⚠️ ALERT: Database "${link.name}" is OFFLINE`;
+      let text = `The monitored database "${link.name}" has gone offline.\n\n` +
+                   `Details:\n` +
+                   `- New Status: ${status}\n` +
+                   `- Status: ${message}\n`;
+      if (dbError) {
+        text += `- Connection Error: ${dbError}\n`;
+      }
+      text += `- Timestamp: ${new Date().toISOString()}\n\n` +
+              `Please check your DB-Pulse dashboard to review logs.`;
+      sendEmailNotification(subject, text);
+    }
+    // Transition 2: OFFLINE or RECOVERING -> ONLINE
+    else if ((lastStatus === 'OFFLINE' || lastStatus === 'RECOVERING') && status === 'ONLINE') {
+      const subject = `✅ RECOVERED: Database "${link.name}" is ONLINE`;
+      const text = `The monitored database "${link.name}" has recovered and is now online.\n\n` +
+                   `Details:\n` +
+                   `- Status: ONLINE\n` +
+                   `- Latency: ${latency}ms\n` +
+                   `- Timestamp: ${new Date().toISOString()}`;
+      sendEmailNotification(subject, text);
+    }
+  }
+
+  // Update last known status
+  lastKnownStatuses.set(link.id, status);
 
   return { status, latency, message };
 }
