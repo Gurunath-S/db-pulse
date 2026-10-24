@@ -33,6 +33,7 @@ function App() {
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editId, setEditId] = useState(null);
+  const [selectedEngineTab, setSelectedEngineTab] = useState('AUTO'); // 'AUTO', 'MONGODB', 'POSTGRES', 'MYSQL'
   const [formData, setFormData] = useState({
     name: '',
     connectionString: '',
@@ -203,6 +204,8 @@ function App() {
     if (e) e.stopPropagation();
     setIsEditing(true);
     setEditId(link.id);
+    const detected = getDbType(link.connectionString);
+    setSelectedEngineTab(detected === 'MongoDB' ? 'MONGODB' : detected === 'PostgreSQL' ? 'POSTGRES' : detected === 'MySQL' ? 'MYSQL' : 'AUTO');
     setFormData({
       name: link.name,
       connectionString: link.connectionString,
@@ -264,6 +267,7 @@ function App() {
       );
       
       // Reset form
+      setSelectedEngineTab('AUTO');
       setFormData({
         name: '',
         connectionString: '',
@@ -286,6 +290,7 @@ function App() {
   const cancelForm = () => {
     setIsEditing(false);
     setEditId(null);
+    setSelectedEngineTab('AUTO');
     setFormData({
       name: '',
       connectionString: '',
@@ -361,7 +366,7 @@ function App() {
   };
 
   const getDbType = (connectionString) => {
-    if (!connectionString) return 'MySQL';
+    if (!connectionString || !connectionString.trim()) return null;
     const str = connectionString.trim().toLowerCase();
     if (str.startsWith('mongodb://') || str.startsWith('mongodb+srv://')) return 'MongoDB';
     if (str.startsWith('postgres://') || str.startsWith('postgresql://')) return 'PostgreSQL';
@@ -370,10 +375,11 @@ function App() {
   };
 
   const getDbTypeBadgeClass = (connectionString) => {
-    const type = getDbType(connectionString).toLowerCase();
-    if (type === 'mongodb') return 'db-type-mongodb';
-    if (type === 'postgresql') return 'db-type-postgres';
-    return 'db-type-mysql';
+    const type = getDbType(connectionString);
+    if (type === 'MongoDB') return 'db-type-mongodb';
+    if (type === 'PostgreSQL') return 'db-type-postgres';
+    if (type === 'MySQL') return 'db-type-mysql';
+    return 'db-type-auto';
   };
 
   const getDisplayHost = (connectionString) => {
@@ -516,66 +522,114 @@ function App() {
                 </div>
               </div>
 
+              {/* Engine Selector Tabs */}
+              <div className="engine-tabs-container">
+                <span className="section-sublabel">Select Database Engine or Use Auto-Detect:</span>
+                <div className="engine-tabs">
+                  <button
+                    type="button"
+                    className={`engine-tab ${selectedEngineTab === 'AUTO' ? 'active' : ''}`}
+                    onClick={() => setSelectedEngineTab('AUTO')}
+                  >
+                    ⚡ Auto-Detect
+                  </button>
+                  <button
+                    type="button"
+                    className={`engine-tab mongodb ${selectedEngineTab === 'MONGODB' ? 'active' : ''}`}
+                    onClick={() => {
+                      setSelectedEngineTab('MONGODB');
+                      if (!formData.connectionString) {
+                        setFormData(prev => ({ ...prev, connectionString: 'mongodb+srv://username:password@cluster0.mongodb.net/database' }));
+                      }
+                    }}
+                  >
+                    🍃 MongoDB (Atlas)
+                  </button>
+                  <button
+                    type="button"
+                    className={`engine-tab postgres ${selectedEngineTab === 'POSTGRES' ? 'active' : ''}`}
+                    onClick={() => {
+                      setSelectedEngineTab('POSTGRES');
+                      if (!formData.connectionString) {
+                        setFormData(prev => ({ ...prev, connectionString: 'postgresql://username:password@host:5432/database?sslmode=require' }));
+                      }
+                    }}
+                  >
+                    🐘 PostgreSQL
+                  </button>
+                  <button
+                    type="button"
+                    className={`engine-tab mysql ${selectedEngineTab === 'MYSQL' ? 'active' : ''}`}
+                    onClick={() => {
+                      setSelectedEngineTab('MYSQL');
+                      if (!formData.connectionString) {
+                        setFormData(prev => ({ ...prev, connectionString: 'mysql://username:password@host:3306/database?ssl-mode=REQUIRED' }));
+                      }
+                    }}
+                  >
+                    🐬 MySQL
+                  </button>
+                </div>
+              </div>
+
               <div className="form-group">
                 <div className="form-label-with-engine">
-                  <label>Database Connection String (URI)</label>
-                  <span className={`engine-detected-pill ${getDbTypeBadgeClass(formData.connectionString)}`}>
-                    Engine: {getDbType(formData.connectionString)}
-                  </span>
+                  <label>Database Connection URI</label>
+                  {getDbType(formData.connectionString) ? (
+                    <span className={`engine-detected-pill ${getDbTypeBadgeClass(formData.connectionString)}`}>
+                      {getDbType(formData.connectionString) === 'MongoDB' && '🍃 MongoDB Detected'}
+                      {getDbType(formData.connectionString) === 'PostgreSQL' && '🐘 PostgreSQL Detected'}
+                      {getDbType(formData.connectionString) === 'MySQL' && '🐬 MySQL Detected'}
+                      {getDbType(formData.connectionString) === 'Database' && '🔌 Connection URI'}
+                    </span>
+                  ) : (
+                    <span className="engine-detected-pill db-type-auto">
+                      ⚡ Paste any MongoDB, PostgreSQL, or MySQL URI
+                    </span>
+                  )}
                 </div>
                 <input
                   type="text"
                   name="connectionString"
                   value={formData.connectionString}
-                  onChange={handleInputChange}
+                  onChange={(e) => {
+                    handleInputChange(e);
+                    const detected = getDbType(e.target.value);
+                    if (detected === 'MongoDB') setSelectedEngineTab('MONGODB');
+                    else if (detected === 'PostgreSQL') setSelectedEngineTab('POSTGRES');
+                    else if (detected === 'MySQL') setSelectedEngineTab('MYSQL');
+                  }}
                   placeholder={
-                    getDbType(formData.connectionString) === 'MongoDB'
-                      ? 'mongodb+srv://user:password@cluster.mongodb.net/database'
-                      : getDbType(formData.connectionString) === 'PostgreSQL'
-                      ? 'postgresql://user:password@host:port/database?sslmode=require'
-                      : 'mysql://user:password@host:port/database?ssl-mode=REQUIRED'
+                    selectedEngineTab === 'MONGODB'
+                      ? 'mongodb+srv://username:password@cluster0.mongodb.net/dbname'
+                      : selectedEngineTab === 'POSTGRES'
+                      ? 'postgresql://username:password@host:5432/dbname?sslmode=require'
+                      : selectedEngineTab === 'MYSQL'
+                      ? 'mysql://username:password@host:3306/dbname?ssl-mode=REQUIRED'
+                      : 'mongodb+srv://... or postgresql://... or mysql://...'
                   }
                   required
                 />
-                <div className="engine-examples-row">
-                  <span className="examples-title">Quick Prototypes:</span>
-                  <button
-                    type="button"
-                    className="engine-example-tag"
-                    onClick={() => {
-                      if (!formData.connectionString) {
-                        setFormData(prev => ({ ...prev, connectionString: 'mysql://user:password@host:3306/db?ssl-mode=REQUIRED' }));
-                      }
-                    }}
-                  >
-                    MySQL (mysql://)
-                  </button>
-                  <button
-                    type="button"
-                    className="engine-example-tag"
-                    onClick={() => {
-                      if (!formData.connectionString) {
-                        setFormData(prev => ({ ...prev, connectionString: 'postgresql://user:password@host:5432/db?sslmode=require' }));
-                      }
-                    }}
-                  >
-                    PostgreSQL (postgresql://)
-                  </button>
-                  <button
-                    type="button"
-                    className="engine-example-tag"
-                    onClick={() => {
-                      if (!formData.connectionString) {
-                        setFormData(prev => ({ ...prev, connectionString: 'mongodb+srv://user:password@cluster0.mongodb.net/db' }));
-                      }
-                    }}
-                  >
-                    MongoDB (mongodb+srv://)
-                  </button>
+                
+                <div className="engine-hint-box">
+                  {selectedEngineTab === 'MONGODB' || getDbType(formData.connectionString) === 'MongoDB' ? (
+                    <p className="engine-hint">
+                      🍃 <strong>MongoDB Keep-Alive:</strong> Uses the official MongoDB driver with <code>admin().ping()</code> heartbeat checks. Compatible with <strong>MongoDB Atlas</strong> (<code>mongodb+srv://</code>) and local/cloud clusters.
+                    </p>
+                  ) : selectedEngineTab === 'POSTGRES' || getDbType(formData.connectionString) === 'PostgreSQL' ? (
+                    <p className="engine-hint">
+                      🐘 <strong>PostgreSQL Keep-Alive:</strong> Uses the <code>pg</code> driver with <code>SELECT 1;</code> query pings. Automatically supports SSL/TLS for <strong>Supabase, Neon, Render, AWS RDS, and Aiven</strong>.
+                    </p>
+                  ) : selectedEngineTab === 'MYSQL' || getDbType(formData.connectionString) === 'MySQL' ? (
+                    <p className="engine-hint">
+                      🐬 <strong>MySQL Keep-Alive:</strong> Uses <code>mysql2</code> with <code>SELECT 1</code> heartbeat checks. Supports SSL connections and cloud MySQL hosts.
+                    </p>
+                  ) : (
+                    <p className="engine-hint">
+                      ⚡ <strong>Multi-Database Support:</strong> Paste your connection string above. DB-Pulse automatically selects the right driver (MongoDB, PostgreSQL, or MySQL) and runs periodic lightweight keep-alives.
+                    </p>
+                  )}
                 </div>
-                <small className="help-text">
-                  Supports MySQL, PostgreSQL, and MongoDB. Secure connections (SSL/TLS) are handled automatically. Credentials remain local.
-                </small>
               </div>
 
               <div className="checkbox-group">
@@ -643,7 +697,7 @@ function App() {
                           name="aivenService"
                           value={formData.aivenService}
                           onChange={handleInputChange}
-                          placeholder="e.g. mysql-15c533a1"
+                          placeholder="e.g. pg-15c533a1, mysql-15c533a1"
                           required={formData.aivenAutoRecovery}
                         />
                       </div>
