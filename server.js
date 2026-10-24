@@ -5,6 +5,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import mysql from 'mysql2/promise';
+import pg from 'pg';
+import { MongoClient } from 'mongodb';
 import nodemailer from 'nodemailer';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -72,6 +74,8 @@ if (!fs.existsSync(LINKS_FILE)) {
   if (process.env.DEFAULT_DB_CONNECTION) {
     let service = '';
     let project = '';
+    const initialDbType = detectDbType(process.env.DEFAULT_DB_CONNECTION);
+    const typeLabel = initialDbType === 'postgres' ? 'PostgreSQL' : initialDbType === 'mongodb' ? 'MongoDB' : 'MySQL';
     try {
       const url = new URL(process.env.DEFAULT_DB_CONNECTION);
       // Extract service name and project from Aiven host: service-project.c.aivencloud.com
@@ -88,8 +92,8 @@ if (!fs.existsSync(LINKS_FILE)) {
     }
 
     initialLinks.push({
-      id: "aiven-default-mysql",
-      name: "Aiven Default MySQL",
+      id: `default-${initialDbType}`,
+      name: `Default ${typeLabel}`,
       connectionString: process.env.DEFAULT_DB_CONNECTION,
       intervalMinutes: 5,
       active: true,
@@ -128,8 +132,24 @@ function writeJSON(filePath, data) {
   }
 }
 
-// Parse connection URL to config options
-function parseConnectionString(connectionString) {
+// Detect database type from connection string
+function detectDbType(connectionString) {
+  if (!connectionString) return 'unknown';
+  const str = connectionString.trim().toLowerCase();
+  if (str.startsWith('mongodb://') || str.startsWith('mongodb+srv://')) {
+    return 'mongodb';
+  }
+  if (str.startsWith('postgres://') || str.startsWith('postgresql://')) {
+    return 'postgres';
+  }
+  if (str.startsWith('mysql://')) {
+    return 'mysql';
+  }
+  return 'unknown';
+}
+
+// Parse MySQL connection URL to config options
+function parseMysqlConnectionString(connectionString) {
   try {
     const url = new URL(connectionString);
     const isSslRequired = url.searchParams.get('ssl-mode') === 'REQUIRED' ||
@@ -170,6 +190,74 @@ function parseConnectionString(connectionString) {
     }
     throw new Error("Invalid MySQL connection string format. Use mysql://user:pass@host:port/db");
   }
+}
+
+// Parse PostgreSQL connection URL to config options
+function parsePostgresConfig(connectionString) {
+  try {
+    const url = new URL(connectionString);
+    if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+      throw new Error("Protocol must be postgres: or postgresql:");
+    }
+    const sslMode = url.searchParams.get('sslmode');
+    const isSslRequired = sslMode === 'require' ||
+                          sslMode === 'prefer' ||
+                          sslMode === 'no-verify' ||
+                          url.searchParams.get('ssl') === 'true' ||
+                          url.searchParams.get('ssl') === '1' ||
+                          connectionString.includes('sslmode=require') ||
+                          url.hostname.includes('aivencloud.com') ||
+                          url.hostname.includes('supabase.co') ||
+                          url.hostname.includes('neon.tech') ||
+                          url.hostname.includes('render.com') ||
+                          url.hostname.includes('aws.neon.tech');
+
+    const config = {
+      connectionString,
+      connectionTimeoutMillis: 7000,
+    };
+
+    if (isSslRequired) {
+      config.ssl = {
+        rejectUnauthorized: false
+      };
+    }
+    return config;
+  } catch (e) {
+    if (e.message && e.message.includes('Protocol must be')) throw e;
+    throw new Error("Invalid PostgreSQL connection string format. Use postgresql://user:pass@host:port/database");
+  }
+}
+
+// Validate MongoDB connection URL
+function validateMongoConnectionString(connectionString) {
+  const trimmed = connectionString.trim();
+  if (!trimmed.startsWith('mongodb://') && !trimmed.startsWith('mongodb+srv://')) {
+    throw new Error("Invalid MongoDB connection string. Must start with mongodb:// or mongodb+srv://");
+  }
+  try {
+    new URL(trimmed);
+  } catch (e) {
+    if (!/mongodb(\+srv)?:\/\//.test(trimmed)) {
+      throw new Error("Invalid MongoDB connection string format.");
+    }
+  }
+  return true;
+}
+
+// Unified connection string validator
+function validateConnectionString(connectionString) {
+  const type = detectDbType(connectionString);
+  if (type === 'mysql') {
+    return parseMysqlConnectionString(connectionString);
+  }
+  if (type === 'postgres') {
+    return parsePostgresConfig(connectionString);
+  }
+  if (type === 'mongodb') {
+    return validateMongoConnectionString(connectionString);
+  }
+  throw new Error("Unsupported database connection format. Supported protocols: mysql://, postgresql://, postgres://, mongodb://, or mongodb+srv://");
 }
 
 // Aiven API wake up call
@@ -223,23 +311,44 @@ async function fetchAivenServiceStatus(project, service, token) {
 // Perform ping on database connection
 async function pingDatabase(link) {
   const start = Date.now();
-  let conn = null;
   let status = 'ONLINE';
   let latency = 0;
   let message = 'Connection active';
   let dbError = '';
+  const dbType = detectDbType(link.connectionString);
+
+  let mysqlConn = null;
+  let pgClient = null;
+  let mongoClient = null;
 
   try {
-    const config = parseConnectionString(link.connectionString);
-    conn = await mysql.createConnection(config);
-    await conn.query('SELECT 1');
+    if (dbType === 'mysql') {
+      const config = parseMysqlConnectionString(link.connectionString);
+      mysqlConn = await mysql.createConnection(config);
+      await mysqlConn.query('SELECT 1');
+    } else if (dbType === 'postgres') {
+      const config = parsePostgresConfig(link.connectionString);
+      pgClient = new pg.Client(config);
+      await pgClient.connect();
+      await pgClient.query('SELECT 1');
+    } else if (dbType === 'mongodb') {
+      mongoClient = new MongoClient(link.connectionString, {
+        serverSelectionTimeoutMS: 7000,
+        connectTimeoutMS: 7000,
+      });
+      await mongoClient.connect();
+      await mongoClient.db().admin().ping();
+    } else {
+      throw new Error(`Unsupported database URI scheme. Supported: MySQL (mysql://), PostgreSQL (postgresql://, postgres://), MongoDB (mongodb://, mongodb+srv://)`);
+    }
+
     latency = Date.now() - start;
   } catch (error) {
     latency = Date.now() - start;
     status = 'OFFLINE';
     message = error.message;
     dbError = error.message; // Capture original connection error
-    console.warn(`[Ping Failed] Database "${link.name}" is offline:`, message);
+    console.warn(`[Ping Failed] Database "${link.name}" (${dbType.toUpperCase()}) is offline:`, message);
 
     // If Aiven auto-recovery is enabled, attempt to power it on!
     if (link.aivenAutoRecovery && link.aivenToken && link.aivenProject && link.aivenService) {
@@ -253,11 +362,25 @@ async function pingDatabase(link) {
       }
     }
   } finally {
-    if (conn) {
+    if (mysqlConn) {
       try {
-        await conn.end();
+        await mysqlConn.end();
       } catch (err) {
-        console.error('Error closing connection:', err);
+        console.error('Error closing MySQL connection:', err);
+      }
+    }
+    if (pgClient) {
+      try {
+        await pgClient.end();
+      } catch (err) {
+        console.error('Error closing PostgreSQL connection:', err);
+      }
+    }
+    if (mongoClient) {
+      try {
+        await mongoClient.close();
+      } catch (err) {
+        console.error('Error closing MongoDB connection:', err);
       }
     }
   }
@@ -267,7 +390,8 @@ async function pingDatabase(link) {
     status,
     latency,
     lastPinged: new Date().toISOString(),
-    message
+    message,
+    dbType
   });
 
   // Write to ping logs JSON
@@ -279,7 +403,8 @@ async function pingDatabase(link) {
     timestamp: new Date().toISOString(),
     status,
     latency,
-    message
+    message,
+    dbType
   });
 
   // Limit logs to last 100 entries per link to keep files clean
@@ -291,11 +416,13 @@ async function pingDatabase(link) {
   // Handle status transition email alerts
   const lastStatus = lastKnownStatuses.get(link.id);
   if (lastStatus !== undefined && lastStatus !== status) {
+    const typeLabel = dbType.toUpperCase();
     // Transition 1: ONLINE -> OFFLINE or RECOVERING
     if (lastStatus === 'ONLINE' && (status === 'OFFLINE' || status === 'RECOVERING')) {
-      const subject = `⚠️ ALERT: Database "${link.name}" is OFFLINE`;
-      let text = `The monitored database "${link.name}" has gone offline.\n\n` +
+      const subject = `⚠️ ALERT: Database "${link.name}" (${typeLabel}) is OFFLINE`;
+      let text = `The monitored database "${link.name}" (${typeLabel}) has gone offline.\n\n` +
                    `Details:\n` +
+                   `- Engine: ${typeLabel}\n` +
                    `- New Status: ${status}\n` +
                    `- Status: ${message}\n`;
       if (dbError) {
@@ -307,9 +434,10 @@ async function pingDatabase(link) {
     }
     // Transition 2: OFFLINE or RECOVERING -> ONLINE
     else if ((lastStatus === 'OFFLINE' || lastStatus === 'RECOVERING') && status === 'ONLINE') {
-      const subject = `✅ RECOVERED: Database "${link.name}" is ONLINE`;
-      const text = `The monitored database "${link.name}" has recovered and is now online.\n\n` +
+      const subject = `✅ RECOVERED: Database "${link.name}" (${typeLabel}) is ONLINE`;
+      const text = `The monitored database "${link.name}" (${typeLabel}) has recovered and is now online.\n\n` +
                    `Details:\n` +
+                   `- Engine: ${typeLabel}\n` +
                    `- Status: ONLINE\n` +
                    `- Latency: ${latency}ms\n` +
                    `- Timestamp: ${new Date().toISOString()}`;
@@ -320,7 +448,7 @@ async function pingDatabase(link) {
   // Update last known status
   lastKnownStatuses.set(link.id, status);
 
-  return { status, latency, message };
+  return { status, latency, message, dbType };
 }
 
 // Start Scheduler for a database link
@@ -383,8 +511,10 @@ app.get('/api/links', (req, res) => {
       lastPinged: null,
       message: link.active ? 'Awaiting first check...' : 'Monitoring is paused'
     };
+    const dbType = link.dbType || detectDbType(link.connectionString);
     return {
       ...link,
+      dbType,
       // Strip token from response to keep client secure (send boolean indicator)
       hasToken: !!link.aivenToken,
       aivenToken: undefined, 
@@ -406,15 +536,17 @@ app.post('/api/links', async (req, res) => {
   }
 
   try {
-    parseConnectionString(connectionString);
+    validateConnectionString(connectionString);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
 
+  const dbType = detectDbType(connectionString);
   const links = readJSON(LINKS_FILE);
   const newLink = {
     id: `db-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
     name,
+    dbType,
     connectionString,
     intervalMinutes: parseInt(intervalMinutes) || 5,
     active: active !== false,
@@ -434,7 +566,8 @@ app.post('/api/links', async (req, res) => {
       status: 'SLEEPING',
       latency: 0,
       lastPinged: null,
-      message: 'Monitoring is paused'
+      message: 'Monitoring is paused',
+      dbType
     });
   }
 
@@ -454,7 +587,7 @@ app.put('/api/links/:id', (req, res) => {
   }
 
   try {
-    if (connectionString) parseConnectionString(connectionString);
+    if (connectionString) validateConnectionString(connectionString);
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
@@ -462,7 +595,6 @@ app.put('/api/links/:id', (req, res) => {
   const existingLink = links[index];
   
   // Update details (if token is empty string, keep existing token if they didn't send a new one, or delete it)
-  // Let's check if they provided a token. If it's a placeholder (like "********"), keep the existing one.
   let finalToken = existingLink.aivenToken;
   if (aivenToken !== undefined) {
     if (aivenToken === '') {
@@ -472,10 +604,12 @@ app.put('/api/links/:id', (req, res) => {
     }
   }
 
+  const newConn = connectionString !== undefined ? connectionString : existingLink.connectionString;
   const updatedLink = {
     ...existingLink,
     name: name !== undefined ? name : existingLink.name,
-    connectionString: connectionString !== undefined ? connectionString : existingLink.connectionString,
+    dbType: detectDbType(newConn),
+    connectionString: newConn,
     intervalMinutes: intervalMinutes !== undefined ? parseInt(intervalMinutes) : existingLink.intervalMinutes,
     active: active !== undefined ? active : existingLink.active,
     aivenAutoRecovery: aivenAutoRecovery !== undefined ? !!aivenAutoRecovery : existingLink.aivenAutoRecovery,
@@ -499,7 +633,8 @@ app.put('/api/links/:id', (req, res) => {
       status: 'SLEEPING',
       latency: 0,
       lastPinged: null,
-      message: 'Monitoring is paused'
+      message: 'Monitoring is paused',
+      dbType: updatedLink.dbType
     });
   }
 
