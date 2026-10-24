@@ -360,6 +360,45 @@ function App() {
     }
   };
 
+  const getDbType = (connectionString) => {
+    if (!connectionString) return 'MySQL';
+    const str = connectionString.trim().toLowerCase();
+    if (str.startsWith('mongodb://') || str.startsWith('mongodb+srv://')) return 'MongoDB';
+    if (str.startsWith('postgres://') || str.startsWith('postgresql://')) return 'PostgreSQL';
+    if (str.startsWith('mysql://')) return 'MySQL';
+    return 'Database';
+  };
+
+  const getDbTypeBadgeClass = (connectionString) => {
+    const type = getDbType(connectionString).toLowerCase();
+    if (type === 'mongodb') return 'db-type-mongodb';
+    if (type === 'postgresql') return 'db-type-postgres';
+    return 'db-type-mysql';
+  };
+
+  const getDisplayHost = (connectionString) => {
+    if (!connectionString) return 'Unknown Host';
+    try {
+      if (connectionString.includes('@')) {
+        const afterAt = connectionString.split('@')[1];
+        return afterAt.split('/')[0].split('?')[0];
+      }
+      const withoutProto = connectionString.replace(/^[a-zA-Z0-9+]+:\/\//, '');
+      return withoutProto.split('/')[0].split('?')[0];
+    } catch (e) {
+      return 'Unknown Host';
+    }
+  };
+
+  const maskConnectionString = (uri) => {
+    if (!uri) return '';
+    try {
+      return uri.replace(/:([^@/:]+)@/, ':••••••••@');
+    } catch (e) {
+      return uri;
+    }
+  };
+
   // Filtering links
   const filteredLinks = links.filter(link => {
     if (filter === 'ALL') return true;
@@ -455,7 +494,7 @@ function App() {
                     name="name"
                     value={formData.name}
                     onChange={handleInputChange}
-                    placeholder="e.g. Production MySQL, Client Read Replica"
+                    placeholder="e.g. Production PostgreSQL, Atlas MongoDB, MySQL Replica"
                     required
                   />
                 </div>
@@ -478,17 +517,64 @@ function App() {
               </div>
 
               <div className="form-group">
-                <label>Database Connection String (MySQL URI)</label>
+                <div className="form-label-with-engine">
+                  <label>Database Connection String (URI)</label>
+                  <span className={`engine-detected-pill ${getDbTypeBadgeClass(formData.connectionString)}`}>
+                    Engine: {getDbType(formData.connectionString)}
+                  </span>
+                </div>
                 <input
                   type="text"
                   name="connectionString"
                   value={formData.connectionString}
                   onChange={handleInputChange}
-                  placeholder="mysql://user:password@host:port/database?ssl-mode=REQUIRED"
+                  placeholder={
+                    getDbType(formData.connectionString) === 'MongoDB'
+                      ? 'mongodb+srv://user:password@cluster.mongodb.net/database'
+                      : getDbType(formData.connectionString) === 'PostgreSQL'
+                      ? 'postgresql://user:password@host:port/database?sslmode=require'
+                      : 'mysql://user:password@host:port/database?ssl-mode=REQUIRED'
+                  }
                   required
                 />
+                <div className="engine-examples-row">
+                  <span className="examples-title">Quick Prototypes:</span>
+                  <button
+                    type="button"
+                    className="engine-example-tag"
+                    onClick={() => {
+                      if (!formData.connectionString) {
+                        setFormData(prev => ({ ...prev, connectionString: 'mysql://user:password@host:3306/db?ssl-mode=REQUIRED' }));
+                      }
+                    }}
+                  >
+                    MySQL (mysql://)
+                  </button>
+                  <button
+                    type="button"
+                    className="engine-example-tag"
+                    onClick={() => {
+                      if (!formData.connectionString) {
+                        setFormData(prev => ({ ...prev, connectionString: 'postgresql://user:password@host:5432/db?sslmode=require' }));
+                      }
+                    }}
+                  >
+                    PostgreSQL (postgresql://)
+                  </button>
+                  <button
+                    type="button"
+                    className="engine-example-tag"
+                    onClick={() => {
+                      if (!formData.connectionString) {
+                        setFormData(prev => ({ ...prev, connectionString: 'mongodb+srv://user:password@cluster0.mongodb.net/db' }));
+                      }
+                    }}
+                  >
+                    MongoDB (mongodb+srv://)
+                  </button>
+                </div>
                 <small className="help-text">
-                  URLs containing <code>ssl-mode=REQUIRED</code> will connect securely. Note: credentials remain stored locally.
+                  Supports MySQL, PostgreSQL, and MongoDB. Secure connections (SSL/TLS) are handled automatically. Credentials remain local.
                 </small>
               </div>
 
@@ -621,14 +707,10 @@ function App() {
                 filteredLinks.map(link => {
                   const isSelected = link.id === selectedLinkId;
                   
-                  // Extract display host name
-                  let displayHost = 'Unknown Host';
-                  try {
-                    const hostPart = link.connectionString.split('@')[1];
-                    if (hostPart) {
-                      displayHost = hostPart.split('/')[0].split(':')[0];
-                    }
-                  } catch (e) {}
+                  // Extract display host name & engine
+                  const displayHost = getDisplayHost(link.connectionString);
+                  const dbEngine = link.dbType ? (link.dbType === 'postgres' ? 'PostgreSQL' : link.dbType === 'mongodb' ? 'MongoDB' : 'MySQL') : getDbType(link.connectionString);
+                  const dbBadgeClass = getDbTypeBadgeClass(link.connectionString);
 
                   return (
                     <div 
@@ -643,7 +725,10 @@ function App() {
                             <span className={`status-glow ${link.status.toLowerCase()}`}></span>
                           </div>
                           <div className="link-meta">
-                            <h3 className="link-name">{link.name}</h3>
+                            <div className="link-title-row">
+                              <h3 className="link-name">{link.name}</h3>
+                              <span className={`db-type-badge ${dbBadgeClass}`}>{dbEngine}</span>
+                            </div>
                             <span className="link-host">{displayHost}</span>
                           </div>
                           <div className="link-status">
@@ -740,13 +825,25 @@ function App() {
                       <span className="info-value">{selectedLink.name}</span>
                     </div>
                     <div className="info-item">
+                      <span className="info-label">Database Engine</span>
+                      <span className="info-value">
+                        <span className={`db-type-badge ${getDbTypeBadgeClass(selectedLink.connectionString)}`}>
+                          {getDbType(selectedLink.connectionString)}
+                        </span>
+                      </span>
+                    </div>
+                    <div className="info-item">
                       <span className="info-label">Ping Interval</span>
                       <span className="info-value">Runs every {selectedLink.intervalMinutes} minute(s)</span>
                     </div>
+                    <div className="info-item">
+                      <span className="info-label">Host Endpoint</span>
+                      <span className="info-value code-font">{getDisplayHost(selectedLink.connectionString)}</span>
+                    </div>
                     <div className="info-item full-width">
-                      <span className="info-label">MySQL Connection URL (Credentials Masked)</span>
+                      <span className="info-label">Connection URL (Credentials Masked)</span>
                       <span className="info-value code-font">
-                        {selectedLink.connectionString.replace(/:([^@:]+)@/, ':••••••••@')}
+                        {maskConnectionString(selectedLink.connectionString)}
                       </span>
                     </div>
                   </div>
@@ -827,10 +924,15 @@ function App() {
                         if (log.status === 'OFFLINE') statusColor = 'text-danger';
                         if (log.status === 'RECOVERING') statusColor = 'text-warning';
 
+                        const engineTag = log.dbType 
+                          ? log.dbType.toUpperCase() 
+                          : getDbType(selectedLink.connectionString).toUpperCase();
+
                         return (
                           <div key={index} className="log-line">
                             <span className="log-time">[{dateStr}]</span>
                             <span className={`log-badge ${statusColor}`}>{log.status}</span>
+                            <span className="log-engine">[{engineTag}]</span>
                             <span className="log-latency">({log.latency}ms)</span>
                             <span className="log-msg">&rarr; {log.message}</span>
                           </div>
